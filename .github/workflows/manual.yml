@@ -1,4 +1,4 @@
-name: Add German & US Streams
+name: Add German Streams
 
 on:
   schedule:
@@ -8,64 +8,43 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: iptv-update
-  cancel-in-progress: false
-
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch, filter, append
+      - name: Fetch & filter German streams
         run: |
           set -e
-          SOURCE="http://3serverx.com/get.php?username=2674385091&password=M43877654&type=m3u_plus&output=ts"
+          SOURCE="http://3serverx.com/get.php?username=2674385091&password=M43877654&type=m3u_plus&output=m3u8"
 
           curl -sL --max-time 90 -A "Mozilla/5.0" "$SOURCE" -o /tmp/source.m3u
           echo "Source lines: $(wc -l < /tmp/source.m3u)"
 
+          [ -f EU.m3u ] || echo "#EXTM3U" > EU.m3u
+
+          # Pair #EXTINF with next URL, filter German, output "meta<TAB>url"
           awk '/^#EXTINF/{m=$0;next} /^http/&&m{print m"\t"$0; m=""}' /tmp/source.m3u \
-            > /tmp/all.tsv
-          echo "Total paired streams: $(wc -l < /tmp/all.tsv)"
+          | grep -iE 'german|germany|deutsch|\[de\]|\(de\)|zdf|ard|rtl|sat\.1|prosieben|kabel eins|vox|3sat|wdr|ndr|swr|mdr|sport1|dazn|sky sport|sky bundesliga|magenta sport|bundesliga|das erste|arte|phoenix|n-tv|welt|rtl2|sixx|rtlzwei|nitro|tele 5|servus|orf|srfernsehen|hr-fernsehen|rbb|radiobremen|tagesschau' \
+          > /tmp/german.tsv || true
 
-          DE_PAT='german|germany|deutsch|\[de\]|\(de\)|zdf|ard|rtl|sat\.1|prosieben|kabel eins|vox|3sat|wdr|ndr|swr|mdr|sport1|dazn|sky sport|sky bundesliga|magenta sport|bundesliga|das erste|arte|phoenix|n-tv|welt|rtl2|sixx|nitro|tele 5|servus|orf|srfernsehen|hr-fernsehen|rbb|radiobremen|tagesschau'
-          US_PAT='usa|united states|\[us\]|\(us\)|american|abc|nbc|cbs|fox news|cnn|espn|hbo|showtime|amc|tnt|tbs|usa network|syfy|bravo|discovery|history channel|nat geo|mtv|vh1|bet\b|pbs|the cw|starz|fx\b|fxx|comedy central|nickelodeon|cartoon network|adult swim'
+          echo "German candidates: $(wc -l < /tmp/german.tsv)"
 
-          add_streams() {
-            local pat="$1" target="$2" want="$3"
-            echo "=== $target ==="
+          # Drop URLs already in EU.m3u
+          grep -oE 'http[^[:space:]]+' EU.m3u | sort -u > /tmp/have.txt || true
+          awk -F'\t' 'NR==FNR{have[$0]=1;next} !($2 in have)' /tmp/have.txt /tmp/german.tsv \
+            > /tmp/fresh.tsv
 
-            [ -f "$target" ] || echo "#EXTM3U" > "$target"
+          echo "Fresh German: $(wc -l < /tmp/fresh.tsv)"
 
-            grep -iE "$pat" /tmp/all.tsv > /tmp/cand.tsv || true
-            echo "  candidates: $(wc -l < /tmp/cand.tsv)"
-
-            grep -oE 'http[^[:space:]]+' "$target" 2>/dev/null | sort -u > /tmp/have.txt || true
-            awk -F'\t' 'NR==FNR{have[$0]=1;next} !($2 in have)' /tmp/have.txt /tmp/cand.tsv \
-              > /tmp/fresh.tsv
-            echo "  fresh: $(wc -l < /tmp/fresh.tsv)"
-
-            shuf /tmp/fresh.tsv | head -n "$want" | tr '\t' '\n' >> "$target"
-            echo "  appended up to $want"
-          }
-
-          add_streams "$DE_PAT" "DE.m3u" 10
-          add_streams "$US_PAT" "US.m3u" 10
-
-      - name: Debug — top group-titles (ignore if it works)
-        run: |
-          echo "Top 30 group-titles in source:"
-          awk '/^#EXTINF/{m=$0;next} /^http/&&m{print m; m=""}' /tmp/source.m3u \
-            | grep -oE 'group-title="[^"]*"' | sort | uniq -c | sort -rn | head -30
+          # Shuffle, pick 10, split back to pairs, append
+          shuf /tmp/fresh.tsv | head -n 10 | tr '\t' '\n' >> EU.m3u
 
       - name: Commit
         run: |
           git config user.name "iptv-bot"
           git config user.email "bot@users.noreply.github.com"
-          [ -f DE.m3u ] || echo "#EXTM3U" > DE.m3u
-          [ -f US.m3u ] || echo "#EXTM3U" > US.m3u
-          git add DE.m3u US.m3u
+          git add EU.m3u
           git diff --cached --quiet && echo "no changes" || \
-            (git commit -m "Add random German & US streams" && git push)
+            (git commit -m "Add random German streams" && git push)
