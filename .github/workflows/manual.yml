@@ -16,7 +16,7 @@ jobs:
 
       - name: Fetch, filter, validate, append
         env:
-          SOURCE_M3U: "http://b2wbs.com/get.php?username=02DC5442951471A&password=TQo9GN8An0&type=m3u_plus&output=m3u8"
+          SOURCE_M3U: "http://kalvirox.cc/get.php?username=6FW4W35&password=33PL75L&type=m3u_plus&output=m3u8"
         run: |
           set -e
           curl -sL --max-time 90 -A "Mozilla/5.0" "$SOURCE_M3U" -o /tmp/source.m3u
