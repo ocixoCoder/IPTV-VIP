@@ -8,117 +8,64 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: iptv-update
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Fetch, filter, validate, append
-        env:
-          SOURCE_M3U: "http://3serverx.com/get.php?username=2674385091&password=M43877654&type=m3u_plus&output=m3u8"
+      - name: Fetch, filter, append
         run: |
           set -e
-          curl -sL --max-time 90 -A "Mozilla/5.0" "$SOURCE_M3U" -o /tmp/source.m3u
+          SOURCE="http://3serverx.com/get.php?username=2674385091&password=M43877654&type=m3u_plus&output=ts"
+
+          curl -sL --max-time 90 -A "Mozilla/5.0" "$SOURCE" -o /tmp/source.m3u
           echo "Source lines: $(wc -l < /tmp/source.m3u)"
 
-          # Build "meta<TAB>url" pairs once
           awk '/^#EXTINF/{m=$0;next} /^http/&&m{print m"\t"$0; m=""}' /tmp/source.m3u \
             > /tmp/all.tsv
           echo "Total paired streams: $(wc -l < /tmp/all.tsv)"
 
-          # ---------- language patterns ----------
           DE_PAT='german|germany|deutsch|\[de\]|\(de\)|zdf|ard|rtl|sat\.1|prosieben|kabel eins|vox|3sat|wdr|ndr|swr|mdr|sport1|dazn|sky sport|sky bundesliga|magenta sport|bundesliga|das erste|arte|phoenix|n-tv|welt|rtl2|sixx|nitro|tele 5|servus|orf|srfernsehen|hr-fernsehen|rbb|radiobremen|tagesschau'
           US_PAT='usa|united states|\[us\]|\(us\)|american|abc|nbc|cbs|fox news|cnn|espn|hbo|showtime|amc|tnt|tbs|usa network|syfy|bravo|discovery|history channel|nat geo|mtv|vh1|bet\b|pbs|the cw|starz|fx\b|fxx|comedy central|nickelodeon|cartoon network|adult swim'
 
-          filter_and_prepare() {
-            local pat="$1" target="$2"
-            grep -iE "$pat" /tmp/all.tsv > /tmp/cand.tsv || true
-            echo "  $target candidates: $(wc -l < /tmp/cand.tsv)"
+          add_streams() {
+            local pat="$1" target="$2" want="$3"
+            echo "=== $target ==="
 
             [ -f "$target" ] || echo "#EXTM3U" > "$target"
 
-            # drop URLs already in target
+            grep -iE "$pat" /tmp/all.tsv > /tmp/cand.tsv || true
+            echo "  candidates: $(wc -l < /tmp/cand.tsv)"
+
             grep -oE 'http[^[:space:]]+' "$target" 2>/dev/null | sort -u > /tmp/have.txt || true
             awk -F'\t' 'NR==FNR{have[$0]=1;next} !($2 in have)' /tmp/have.txt /tmp/cand.tsv \
               > /tmp/fresh.tsv
-            echo "  $target fresh: $(wc -l < /tmp/fresh.tsv)"
+            echo "  fresh: $(wc -l < /tmp/fresh.tsv)"
+
+            shuf /tmp/fresh.tsv | head -n "$want" | tr '\t' '\n' >> "$target"
+            echo "  appended up to $want"
           }
 
-          # ---------- playability check ----------
-          is_playable() {
-            local url="$1"
-            local pl
-            pl=$(curl -sL -m 12 -A "Mozilla/5.0" "$url" || echo "")
-            [ -z "$pl" ] && return 1
-            echo "$pl" | grep -qi "#EXTM3U" || return 1
+          add_streams "$DE_PAT" "DE.m3u" 10
+          add_streams "$US_PAT" "US.m3u" 10
 
-            local media_url="$url"
-            if echo "$pl" | grep -q "#EXT-X-STREAM-INF"; then
-              local variant
-              variant=$(echo "$pl" | awk '/^#EXT-X-STREAM-INF/{f=1;next} f&&!/^#/{print;exit}')
-              [ -z "$variant" ] && return 1
-              case "$variant" in
-                http*) media_url="$variant" ;;
-                /*)    media_url="$(echo "$url" | grep -oE '^https?://[^/]+')$variant" ;;
-                *)     media_url="$(dirname "$url")/$variant" ;;
-              esac
-              pl=$(curl -sL -m 12 -A "Mozilla/5.0" "$media_url" || echo "")
-              [ -z "$pl" ] && return 1
-            fi
-
-            local seg
-            seg=$(echo "$pl" | awk '/^#EXTINF/{f=1;next} f&&!/^#/{print;exit}')
-            [ -z "$seg" ] && return 1
-            case "$seg" in
-              http*) seg_url="$seg" ;;
-              /*)    seg_url="$(echo "$media_url" | grep -oE '^https?://[^/]+')$seg" ;;
-              *)     seg_url="$(dirname "$media_url")/$seg" ;;
-            esac
-
-            local code
-            code=$(curl -s -o /dev/null -w "%{http_code}" -m 12 -A "Mozilla/5.0" \
-                    --range 0-1024 "$seg_url" || echo "000")
-            case "$code" in
-              200|206) return 0 ;;
-              401|403) return 0 ;;   # blocked to us, likely fine
-              *)       return 1 ;;
-            esac
-          }
-
-          # ---------- run for each language ----------
-          process() {
-            local pat="$1" target="$2" want="$3"
-            echo "=== $target ==="
-            filter_and_prepare "$pat" "$target"
-
-            # shuffle, then try to find $want playable ones
-            shuf /tmp/fresh.tsv > /tmp/shuffled.tsv
-            local added=0 tried=0
-
-            while IFS=$'\t' read -r meta url; do
-              [ "$added" -ge "$want" ] && break
-              tried=$((tried+1))
-              [ "$tried" -gt 60 ] && break   # cap attempts to keep runtime sane
-
-              if is_playable "$url"; then
-                echo "$meta" >> "$target"
-                echo "$url"  >> "$target"
-                added=$((added+1))
-                echo "  + $(echo "$meta" | sed 's/.*,//')"
-              fi
-            done < /tmp/shuffled.tsv
-
-            echo "  Added $added to $target"
-          }
-
-          process "$DE_PAT" "DE.m3u" 10
-          process "$US_PAT" "US.m3u" 10
+      - name: Debug — top group-titles (ignore if it works)
+        run: |
+          echo "Top 30 group-titles in source:"
+          awk '/^#EXTINF/{m=$0;next} /^http/&&m{print m; m=""}' /tmp/source.m3u \
+            | grep -oE 'group-title="[^"]*"' | sort | uniq -c | sort -rn | head -30
 
       - name: Commit
         run: |
           git config user.name "iptv-bot"
           git config user.email "bot@users.noreply.github.com"
+          [ -f DE.m3u ] || echo "#EXTM3U" > DE.m3u
+          [ -f US.m3u ] || echo "#EXTM3U" > US.m3u
           git add DE.m3u US.m3u
           git diff --cached --quiet && echo "no changes" || \
             (git commit -m "Add random German & US streams" && git push)
