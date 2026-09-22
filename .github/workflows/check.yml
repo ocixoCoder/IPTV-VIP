@@ -1,0 +1,27 @@
+name: Check Streams
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # daily 03:00 UTC
+  workflow_dispatch:        # manual run button
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Clean playlist
+        run: npx -y iptv-checker playlists/streams.m3u -o playlists/streams.m3u
+      - name: Commit if changed
+        run: |
+          git config user.name "iptv-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && echo "No changes" || \
+            git commit -m "Auto-remove dead streams" && git push
