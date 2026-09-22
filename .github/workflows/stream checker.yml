@@ -1,0 +1,96 @@
+name: Check Playable Streams
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # daily 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test every stream in every m3u
+        run: |
+          set -e
+          mapfile -t FILES < <(find . -type f \( -name "*.m3u" -o -name "*.m3u8" \) -not -path "./.git/*")
+          [ ${#FILES[@]} -eq 0 ] && { echo "no playlists"; exit 0; }
+
+          check_stream() {
+            local url="$1"
+
+            # 1. Fetch the m3u8 playlist itself
+            local pl
+            pl=$(curl -sL -m 12 -A "Mozilla/5.0" "$url" || echo "")
+            [ -z "$pl" ] && return 1
+            echo "$pl" | grep -qi "#EXTM3U" || return 1
+
+            # 2. If it's a master playlist, grab the first variant
+            local media_url
+            if echo "$pl" | grep -q "#EXT-X-STREAM-INF"; then
+              local variant
+              variant=$(echo "$pl" | awk '/^#EXT-X-STREAM-INF/{f=1;next} f&&!/^#/{print;exit}')
+              [ -z "$variant" ] && return 1
+              case "$variant" in
+                http*) media_url="$variant" ;;
+                /*)    media_url="$(echo "$url" | grep -oE '^https?://[^/]+')$variant" ;;
+                *)     media_url="$(dirname "$url")/$variant" ;;
+              esac
+              pl=$(curl -sL -m 12 -A "Mozilla/5.0" "$media_url" || echo "")
+              [ -z "$pl" ] && return 1
+            else
+              media_url="$url"
+            fi
+
+            # 3. Grab the first segment URL from the media playlist
+            local seg
+            seg=$(echo "$pl" | awk '/^#EXTINF/{f=1;next} f&&!/^#/{print;exit}')
+            [ -z "$seg" ] && return 1
+            case "$seg" in
+              http*) seg_url="$seg" ;;
+              /*)    seg_url="$(echo "$media_url" | grep -oE '^https?://[^/]+')$seg" ;;
+              *)     seg_url="$(dirname "$media_url")/$seg" ;;
+            esac
+
+            # 4. Try to download a byte of that segment
+            local code
+            code=$(curl -s -o /dev/null -w "%{http_code}" -m 12 -A "Mozilla/5.0" \
+                    --range 0-1024 "$seg_url" || echo "000")
+            case "$code" in
+              200|206) return 0 ;;   # playable
+              *)       return 1 ;;   # not playable
+            esac
+          }
+
+          for f in "${FILES[@]}"; do
+            echo "=== $f ==="
+            TMP=$(mktemp)
+            echo "#EXTM3U" > "$TMP"
+            kept=0; removed=0
+
+            while IFS=$'\t' read -r meta url; do
+              if check_stream "$url"; then
+                echo "$meta" >> "$TMP"
+                echo "$url"  >> "$TMP"
+                kept=$((kept+1))
+              else
+                echo "DEAD: $url"
+                removed=$((removed+1))
+              fi
+            done < <(awk '/^#EXTINF/{m=$0;next} /^http/&&m{print m"\t"$0; m=""}' "$f")
+
+            echo "Kept $kept / Removed $removed"
+            mv "$TMP" "$f"
+          done
+
+      - name: Commit
+        run: |
+          git config user.name "iptv-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && echo "no changes" || \
+            (git commit -m "Remove unplayable streams" && git push)
