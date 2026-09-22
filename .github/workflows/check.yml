@@ -1,9 +1,9 @@
-name: Check Streams
+name: Check All Streams
 
 on:
   schedule:
-    - cron: '0 3 * * *'   # daily 03:00 UTC
-  workflow_dispatch:        # manual run button
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,15 +13,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Clean playlist
-        run: npx -y iptv-checker playlists/streams.m3u -o playlists/streams.m3u
-      - name: Commit if changed
+
+      - name: Clean every m3u/m3u8 file in repo
+        run: |
+          set -e
+          mapfile -t FILES < <(find . -type f \( -name "*.m3u" -o -name "*.m3u8" \) -not -path "./.git/*")
+          echo "Found ${#FILES[@]} file(s):"
+          printf '  %s\n' "${FILES[@]}"
+
+          for f in "${FILES[@]}"; do
+            echo "=== Cleaning $f ==="
+            TMP=$(mktemp -d)
+            npx -y iptv-checker "$f" -o "$TMP" || true
+            OUT=$(find "$TMP" -type f -name "*.m3u*" | head -n1)
+            if [ -n "$OUT" ] && [ -s "$OUT" ]; then
+              cp "$OUT" "$f"
+              echo "Updated $f"
+            else
+              echo "No output for $f, skipping"
+            fi
+            rm -rf "$TMP"
+          done
+
+      - name: Commit
         run: |
           git config user.name "iptv-bot"
           git config user.email "bot@users.noreply.github.com"
           git add -A
-          git diff --cached --quiet && echo "No changes" || \
-            git commit -m "Auto-remove dead streams" && git push
+          git diff --cached --quiet || git commit -m "Auto-remove dead streams"
+          git diff --cached --quiet && echo "no changes" || git push
