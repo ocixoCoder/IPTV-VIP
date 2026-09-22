@@ -1,0 +1,50 @@
+name: Add German Streams
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch & filter German streams
+        run: |
+          set -e
+          SOURCE="http://abc25.xyz/get.php?username=Stefano54&password=XUM569Z&type=m3u_plus&output=m3u8"
+
+          curl -sL --max-time 90 -A "Mozilla/5.0" "$SOURCE" -o /tmp/source.m3u
+          echo "Source lines: $(wc -l < /tmp/source.m3u)"
+
+          [ -f EU.m3u ] || echo "#EXTM3U" > EU.m3u
+
+          # Pair #EXTINF with next URL, filter German, output "meta<TAB>url"
+          awk '/^#EXTINF/{m=$0;next} /^http/&&m{print m"\t"$0; m=""}' /tmp/source.m3u \
+          | grep -iE 'german|germany|deutsch|\[de\]|\(de\)|zdf|ard|rtl|sat\.1|prosieben|kabel eins|vox|3sat|wdr|ndr|swr|mdr|sport1|dazn|sky sport|sky bundesliga|magenta sport|bundesliga|das erste|arte|phoenix|n-tv|welt|rtl2|sixx|rtlzwei|nitro|tele 5|servus|orf|srfernsehen|hr-fernsehen|rbb|radiobremen|tagesschau' \
+          > /tmp/german.tsv || true
+
+          echo "German candidates: $(wc -l < /tmp/german.tsv)"
+
+          # Drop URLs already in EU.m3u
+          grep -oE 'http[^[:space:]]+' EU.m3u | sort -u > /tmp/have.txt || true
+          awk -F'\t' 'NR==FNR{have[$0]=1;next} !($2 in have)' /tmp/have.txt /tmp/german.tsv \
+            > /tmp/fresh.tsv
+
+          echo "Fresh German: $(wc -l < /tmp/fresh.tsv)"
+
+          # Shuffle, pick 10, split back to pairs, append
+          shuf /tmp/fresh.tsv | head -n 10 | tr '\t' '\n' >> EU.m3u
+
+      - name: Commit
+        run: |
+          git config user.name "iptv-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add EU.m3u
+          git diff --cached --quiet && echo "no changes" || \
+            (git commit -m "Add random German streams" && git push)
